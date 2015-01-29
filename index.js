@@ -3,7 +3,10 @@ var fs = require( 'fs' ),
     md5 = require('MD5'),
     exec = require('child_process').exec,
     program = require( 'commander' ),
-    temp = require( 'temp' );
+    temp = require( 'temp' ),
+    zlib = require( 'zlib' ),
+    lineReader = require('line-reader');
+
     
 var INPUT_FILE = "c:/opentext/CS10A/logs/profile_0",
     OUTPUT_FG_FILE = "profile.svg",
@@ -29,17 +32,27 @@ genAll( program.args[0], program.decode, program.output );
 
 function genAll( inputFile, decodeFile, outputFile ) { 
 
-    var tmpFile = temp.dir + "/" + OUTPUT_FG_FILE
-    var stats = loadProfileFile( inputFile, decodeFile, outputFile );
+    var tmpFile = temp.path({suffix: '.fg'}) 
     
-    generateFlameGraph( stats, 
-                    program.flamecmd + ' ' + program.fgoptions, 
-                    tmpFile  );
-
-    var flameGraph = fs.readFileSync( tmpFile, { encoding: 'utf8' } );
-                    
-    generateReport( stats, flameGraph, outputFile );
+    loadProfileFile( inputFile, decodeFile, function( err, stats ) { 
+        if( !err ) { 
+            generateFlameGraph( 
+                stats.stackStats, 
+                program.flamecmd + ' ' + program.fgoptions, 
+                tmpFile, 
+                function flamegraphCB( err2, fgFile ) {
+                    if( !err2 ) {
+                        var flameGraph = fs.readFileSync( fgFile, { encoding: 'utf8' } );
+                        generateReport( stats, flameGraph, outputFile );
+                    }
+                } );
+        }
+        else {
+            console.error( err );
+        }
+    } );    
 }
+
 
 function td( v, cls, title ) { 
     return "<td class='" + cls + "'" + ( title ? " title='" + title + "'>": ">" ) + v + "</td>";
@@ -49,15 +62,20 @@ function generateReport( stats, flameGraph, htmlFile ) {
     
     var byFunction = {}, totalTime = 0;
     
-    stats.forEach( function( v ) { 
+    stats.stackStats.forEach( function( v ) { 
         var f = byFunction[v.frame];
         
         if( !f ) { 
-            byFunction[v.frame] = { func: v.func, frame: v.frame, ownTime: v.ownTime, totalTime: v.time, count: v.count };
+            byFunction[v.frame] = { 
+                func: v.func, 
+                frame: v.frame, 
+                ownTime: v.ownTime, 
+                totalTime: stats.totalTime[v.frame], 
+                count: v.count 
+            };
         }
         else {
             f.ownTime += v.ownTime;
-            f.totalTime += v.time;
             f.count += v.count;
         }
         
@@ -75,6 +93,7 @@ function generateReport( stats, flameGraph, htmlFile ) {
                     "</tr></thead><tbody>" ];
     
     _.each( byFunction, function( v ) { 
+
         var totalTimeEach = v.totalTime / v.count;
         var selfTimeEach = v.ownTime / v.count;
         var percentTime = ( v.ownTime / totalTime ) * 100.0;
@@ -160,26 +179,62 @@ function generateReport( stats, flameGraph, htmlFile ) {
     fs.writeFileSync( htmlFile, content.join( "" ), { encoding: "utf8" } );
 }
 
-function loadProfileFile( fname, decodeFile ) {     
+function loadProfileFile( fname, decodeFile, cb ) {     
     var decodeData = null;
-
+        
     if( decodeFile )  {
-        decodeData = JSON.parse( fs.readFileSync( decodeFile, { encoding: 'utf8' } ) );
+
+        // load the decode data if it was specified.
+        var tmpData = fs.readFileSync( decodeFile, { encoding: 'utf8' } );
+        decodeData = JSON.parse( tmpData );
+        
+        process.nextTick( function() { 
+            traceStacks( fname, decodeData, cb );
+        } );
     }
+    else { 
     
-    var data = fs.readFileSync( fname, { encoding: "utf8" } );
-    return traceStacks( data, decodeData );
+        // check if the first line is our decode data...
+        lineReader.eachLine( fname, function( line, last ) {
+            console.log( "got first line - length is ", line.length );
+            var lineLen = line.length;
+            
+            if( line.charCodeAt( lineLen - 1 ) == 13 ) { 
+                lineLen -= 1;
+            }
+            
+            // if the first line is base64 encoded and doesn't contain comma's try to decode it.
+            if( lineLen % 4 === 0 && line.indexOf( ',' ) === -1 ) { 
+                console.log( "First line checked out." );
+                
+                var buffer = new Buffer( line, 'base64');
+                zlib.inflate( buffer, function( err, mapData ) {
+                    if( !err ) { 
+                        decodeData = JSON.parse( mapData );
+
+                        process.nextTick( function() { 
+                            traceStacks( fname, decodeData, cb );
+                        } );
+                    }
+                    else {
+                        cb( err );
+                    }
+                } );
+            }
+            
+            // exit after first line.
+            return false;
+        } );
+    }    
+
 }
 
-function generateFlameGraph( stats, fgCmd, destFile ) { 
-    var tmpFile = temp.dir + "/" + FG_TEMP_FILE;
+function generateFlameGraph( stats, fgCmd, destFile, doneCB ) { 
+    var tmpFile = temp.path({suffix: '.stack'}) 
 
     var fgData = makeFlameGraphData( stats );
     fs.writeFileSync( tmpFile, fgData );
-    makeFlameGraph( fgCmd, tmpFile, destFile );
-    
-    // remove our temp file.
-    //  fs.unlinkSync( tmpFile );
+    makeFlameGraph( fgCmd, tmpFile, destFile, doneCB );
 }
 
 function makeFlameGraphData( stats ) { 
@@ -188,9 +243,16 @@ function makeFlameGraphData( stats ) {
     } ).join( '\n' );
 }
 
-function makeFlameGraph( cmd, stackFile, outFile ) { 
+function makeFlameGraph( cmd, stackFile, outFile, doneCB ) { 
     exec( cmd + ' ' + stackFile + ' > ' + outFile, function (error, stdout, stderr) {
-        if( error ) console.error( stderr )
+        if( error ) {
+            doneCB( stderr );
+        }
+        else { 
+            doneCB( null, outFile );
+        }
+        
+        fs.unlinkSync( stackFile );
     });
 }
     
@@ -206,7 +268,7 @@ function getFunctionName( funcFullPath ) {
         
         if( funcNames.length === 2 && ( funcNames[0] === funcNames[1] ) ) { 
             parts[1] = funcNames[0];
-        }        
+        }
     }
     return parts.join( "::" );
 }
@@ -215,15 +277,29 @@ function getParentStackID( funcStack ) {
     return getStackID( funcStack.slice( 0, -1 ) );
 }
 
-function getStackID( funcStack ) { 
-    return funcStack.join( ";" );
+function getStackID( funcStack, objName ) { 
+    return funcStack.join( ";" ) + objName;
 }
 
 function identity(n) { 
     return n;
 }
 
-function traceStacks( data, decodeData ) { 
+function calcTimeDiff( tStart_ms, tStart_us, tStop_ms, tStop_us ) {
+    var diffMS, diffMicros, tmp;
+    
+    diffMS = ( tStart_ms <= tStop_ms ) ? ( tStop_ms - tStart_ms ) : ( 2147483647 - tStart_ms ) + tStop_ms;
+    
+    if( diffMS < 2147000 ) { 
+        // Microseconds roll over every ~35 minutes -- use micros for anything less than that.
+        return ( ( tStart_us <= tStop_us ) ? ( tStop_us - tStart_us ) : ( 2147483647 - tStart_us ) + tStop_us );
+    } 
+
+    // otherwise, use milliseconds.
+    return diffMS * 1000;
+}            
+
+function traceStacks( fname, decodeData, cb ) { 
     "use strict";
     
     var decoder = identity;
@@ -236,88 +312,141 @@ function traceStacks( data, decodeData ) {
         else if( arr.length === 1 ) return getFunctionName( decoder( arr[arr.length - 1] ) );
         return getDisplayStack( arr.slice(0,-1) ) + ";" + getFunctionName( decoder( arr[arr.length - 1] ) );
     } );
-
+    
     var stack = [],
         frameStats = {},
-        lines = data.split( "\n" );
+        current = {},
+        totalTime = {},
+        lineNum = 0, 
+        timestamp_ms=0, 
+        timestamp_us=0;
     
-    lines.forEach( function( line ) { 
-        var fields = line.split( "," );
+    lineReader.eachLine( fname, function( line, last ) {
+        lineNum += 1;
+        if( lineNum % 5000 === 0 ) {
+            console.log( "Processed ", lineNum, " lines" );
+        }
         
-        if( fields.length >= 3 ) { 
-            var dir = fields[0],
-                frame = fields[1],
-                timestamp = parseInt( fields[2], 10 );
-            
-            if( dir === "I" ) { 
-                stack.push( { name: frame, startTime: timestamp } );
-            }
-            else { 
-                var top = stack[stack.length - 1];
+        // set a limit (in case of invalid data...)
+        if( line.length > 300 ) {
+            return;
+        }
+        
+        var fields = line.split( "," );
                 
-                if( top.name === frame ) {
-                    var stackPath = _.pluck( stack, "name" ),   // grab all the names on the stack
-                        fullStackID = getStackID( stackPath ) // create ID for that stack
+        if( fields.length < 3 ) { 
+            // ignore lines if they aren't comma separated with at least three items
+            return;
+        }    
+        
+        var dir = ( fields[0].charAt(0) === ">" ) ? ">" : "<",
+            frame = ( dir === ">" ) ? fields[0].substring(1) : fields[0],
+            delta_ms = parseInt( fields[1], 10 ),
+            delta_us = parseInt( fields[2], 10 );
 
-                    stack.pop();
-                    
-                    var elapsed = ( timestamp - top.startTime );
-                    
-                    if( top.startTime >= timestamp ) { 
-                        console.warn( "Had to calculate timestamp overflow." );
-                        elapsed = ( 2147483647 - top.startTime ) + timestamp;
-                    }
-                    
-                    var v = frameStats[fullStackID];
-                    
-                    if( v ) {
-                        v.time += elapsed;
-                        v.count++;
-                    }
-                    else {
-                        var decodedFrame = decoder( frame );
-                        var funcDisplayName = getFunctionName( decodedFrame ),
-                            parentID = getParentStackID( stackPath );
-                        
-                        frameStats[fullStackID] = { 
-                            func: funcDisplayName, 
-                            frame: decodedFrame,
-                            parentID: parentID, 
-                            stackPath: getDisplayStack( stackPath ),
-                            time: elapsed,
-                            count: 1 
-                        };
-                    } 
+        // timestamps are stored as deltas to save space.
+        timestamp_ms += delta_ms;
+        timestamp_us += delta_us;
+        
+        if( dir === ">" ) { 
+            stack.push( { frame: frame, start_us: timestamp_us, start_ms: timestamp_ms } );
+            
+            var c = current[frame];
+            if( !c ) {
+                current[frame] = { ref: 1, start_us: timestamp_us, start_ms: timestamp_ms };
+            }
+            else {
+                c.ref++;
+            }            
+        }
+        else { 
+            var exitRef = stack[stack.length - 1];
+            if( !exitRef || exitRef.frame !== frame ) {
+                console.warn( "Line: ", lineNum+1, " -> Stack pop found frame mismatch.  Was expecting: ", ( exitRef || {} ).frame, " found ", frame );
+                return;
+            }
+            
+            var stackPath = _.pluck( stack, "frame" ),   // grab all the names on the stack
+                fullStackID = getStackID( stackPath ) // create ID for this stack
+
+            stack.pop();
+            
+            var elapsed = calcTimeDiff( exitRef.start_ms, exitRef.start_us, timestamp_ms, timestamp_us );
+            var statsEntry = frameStats[fullStackID];
+            
+            if( statsEntry ) {
+                statsEntry.time += elapsed;
+                statsEntry.count++;
+            }
+            else {
+                var decodedFrame = decoder( frame );
+                var funcDisplayName = getFunctionName( decodedFrame ),
+                    parentID = getParentStackID( stackPath );
+                
+                frameStats[fullStackID] = { 
+                    func: funcDisplayName, 
+                    frame: decodedFrame,
+                    parentID: parentID, 
+                    stackPath: getDisplayStack( stackPath ),
+                    time: elapsed,
+                    count: 1 
+                };
+            } 
+            
+            // calculate total time per function
+            c = current[frame];
+            if( c.ref === 1 ) { 
+                elapsed = calcTimeDiff( c.start_ms, c.start_us, timestamp_ms, timestamp_us );
+                
+                var tt = totalTime[frame];
+
+                if( tt ) { 
+                    tt.totalTime += elapsed;
                 }
-                else { 
-                    console.warn( "Stack pop found frame mismatch -- resetting stack." );
-                    stack = [];
+                else {
+                    totalTime[frame] = { totalTime: elapsed };
+                }
+
+                delete current[frame];
+            }
+            else {
+                c.ref--;
+            }            
+        }
+    } ).then( function() { 
+    
+            // start with each stacks's own time equal to its total time.
+        var rtnStats = _.map( frameStats, function( v, k ) { 
+            v.ownTime = v.time;
+            return v;
+        } );
+        
+        // now calculate "ownTime" by subtracting every function's time from its parent's own time.
+        rtnStats.forEach( function( v ) { 
+            if( v.parentID ) { 
+                var p = frameStats[v.parentID];
+                if( p ) { 
+                    p.ownTime = Math.max( p.ownTime - v.time, 0 );
                 }
             }
-        }
+        } );
+        
+        // now convert owntime and time to ms instead of microseconds...
+        rtnStats.forEach( function( v ) { 
+            v.ownTime /= 1000.0;
+            v.time /= 1000.0;
+        } );
+        
+        // convert totalTime to use real function names...
+        var funcTotalTime = {};
+        
+        _.each( totalTime, function( v, k ) { 
+            funcTotalTime[ decoder( k ) ] = v.totalTime / 1000.0;
+        } );
+        
+        // call the callback.
+        process.nextTick( function() { 
+            cb( null, { stackStats: rtnStats, totalTime: funcTotalTime } );
+        } );
     } );
-    
-    // start with each stacks's own time equal to its total time.
-    var rtnStats = _.map( frameStats, function( v, k ) { 
-        v.ownTime = v.time;
-        return v;
-    } );
-    
-    // now calculate "ownTime" by subtracting every function's time from its parent's own time.
-    rtnStats.forEach( function( v ) { 
-        if( v.parentID ) { 
-            var p = frameStats[v.parentID];
-            if( p ) { 
-                p.ownTime = Math.max( p.ownTime - v.time, 0 );
-            }
-        }
-    } );
-    
-    // now convert owntime and time to ms instead of microseconds...
-    rtnStats.forEach( function( v ) { 
-        v.ownTime /= 1000.0;
-        v.time /= 1000.0;
-    } );
-    
-    return rtnStats;
 }
