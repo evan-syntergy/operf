@@ -357,18 +357,6 @@ function traceStacks( fname, decodeData, cb ) {
         timestamp_us += delta_us;
         
         if( dir === ">" ) { 
-            var dcd = decoder( frame );
-            
-            if( dcd.indexOf( "DVERSDATA::Pre226.Replace" ) > -1 ) { 
-                console.log( dcd, " found at line: ", lineNum );
-                console.log( "Stack is: ", getDisplayStack(  _.pluck( stack, "frame" ) ) );
-                console.log( "Fields are: ", fields );
-            }
-            
-            if( stack.length > 27 ) { 
-            //    console.log( "Top of stack: ", stack[stack.length - 1], ", depth: ", stack.length, ", adding: ", decoder( frame ), ", current stack: ", getDisplayStack(  _.pluck( stack, "frame" ) ) );
-            }        
-        
             stack.push( { frame: frame, start_us: timestamp_us, start_ms: timestamp_ms } );
             
             var c = current[frame];
