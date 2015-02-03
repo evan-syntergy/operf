@@ -13,6 +13,7 @@
     "crypto": "0.0.3",
     "MD5": "~1.2.1",
     "temp": "~0.8.1",
-    "line-reader": "~0.2.4"
+    "line-reader": "~0.2.4",
+    "commander": "~2.6.0"
   }
 }
