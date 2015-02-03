@@ -83,13 +83,14 @@ function generateReport( stats, flameGraph, htmlFile ) {
     } );
 
     var statsTable = [ "<table id='profiler'><thead><tr>", 
-                    "<th class='txt'>Name</th>",
+                    "<th class='txt'>Function Name</th>",
+                    "<th class='num'>Time (sec)</th>", 
+                    "<th class='num'>Time with Children</th>",
                     "<th class='num'>&#37; Time</th>",
-                    "<th class='num'>Cumulative Seconds</th>",
-                    "<th class='num'>Self Seconds</th>", 
-                    "<th class='num'>Count</th>",
-                    "<th class='num'>Self ms/Call</th>",
-                    "<th class='num'>Total ms/Call</th>",
+                    "<th class='num'>&#37; with Children</th>",
+                    "<th class='num'>Hit Count</th>",
+                    "<th class='num'>Own Time/Call (ms)</th>",
+                    "<th class='num'>Total Time/Call (ms)</th>",
                     "</tr></thead><tbody>" ];
     
     _.each( byFunction, function( v ) { 
@@ -97,12 +98,14 @@ function generateReport( stats, flameGraph, htmlFile ) {
         var totalTimeEach = v.totalTime / v.count;
         var selfTimeEach = v.ownTime / v.count;
         var percentTime = ( v.ownTime / totalTime ) * 100.0;
+        var percentTimeChildren = ( v.totalTime / totalTime ) * 100.0;
     
         statsTable.push( "<tr>" 
             + td( v.func, 'txt', v.frame ) 
-            + td( percentTime.toFixed( 3 ), 'num' ) 
-            + td( ( v.totalTime / 1000.0 ).toFixed( 4 ), 'num' ) 
             + td( ( v.ownTime / 1000.0 ).toFixed( 4 ), 'num' ) 
+            + td( ( v.totalTime / 1000.0 ).toFixed( 4 ), 'num' ) 
+            + td( percentTime.toFixed( 3 ), 'num' ) 
+            + td( percentTimeChildren.toFixed( 3 ), 'num' ) 
             + td( v.count, 'num' ) 
             + td( selfTimeEach.toFixed( 3 ), 'num' ) 
             + td( totalTimeEach.toFixed( 3 ), 'num' ) 
@@ -246,7 +249,7 @@ function makeFlameGraphData( stats ) {
 function makeFlameGraph( cmd, stackFile, outFile, doneCB ) { 
     exec( cmd + ' ' + stackFile + ' > ' + outFile, function (error, stdout, stderr) {
         if( error ) {
-            doneCB( stderr );
+            doneCB( error );
         }
         else { 
             doneCB( null, outFile );
@@ -323,19 +326,24 @@ function traceStacks( fname, decodeData, cb ) {
     
     lineReader.eachLine( fname, function( line, last ) {
         lineNum += 1;
-        if( lineNum % 5000 === 0 ) {
-            console.log( "Processed ", lineNum, " lines" );
+        if( lineNum % 100000 === 0 ) {
+            console.log( "Processed ", lineNum, " lines. Stack size = ", stack.length, ", current.length = ", _.keys( current ).length, ", frame stats = ", _.keys( frameStats ).length );
         }
         
         // set a limit (in case of invalid data...)
         if( line.length > 300 ) {
+            // reset stack and total time refcounts.
+            stack = [];
+            current = {};
+            console.log( "Skipping line: ", line.substring( 0, 20 ), "..." );
             return;
         }
-        
+                        
         var fields = line.split( "," );
                 
         if( fields.length < 3 ) { 
             // ignore lines if they aren't comma separated with at least three items
+            console.log( "Skipping line: ", line.substring( 0, 20 ), "..." );
             return;
         }    
         
@@ -349,6 +357,18 @@ function traceStacks( fname, decodeData, cb ) {
         timestamp_us += delta_us;
         
         if( dir === ">" ) { 
+            var dcd = decoder( frame );
+            
+            if( dcd.indexOf( "DVERSDATA::Pre226.Replace" ) > -1 ) { 
+                console.log( dcd, " found at line: ", lineNum );
+                console.log( "Stack is: ", getDisplayStack(  _.pluck( stack, "frame" ) ) );
+                console.log( "Fields are: ", fields );
+            }
+            
+            if( stack.length > 27 ) { 
+            //    console.log( "Top of stack: ", stack[stack.length - 1], ", depth: ", stack.length, ", adding: ", decoder( frame ), ", current stack: ", getDisplayStack(  _.pluck( stack, "frame" ) ) );
+            }        
+        
             stack.push( { frame: frame, start_us: timestamp_us, start_ms: timestamp_ms } );
             
             var c = current[frame];
@@ -363,6 +383,8 @@ function traceStacks( fname, decodeData, cb ) {
             var exitRef = stack[stack.length - 1];
             if( !exitRef || exitRef.frame !== frame ) {
                 console.warn( "Line: ", lineNum+1, " -> Stack pop found frame mismatch.  Was expecting: ", ( exitRef || {} ).frame, " found ", frame );
+                stack = [];
+                current = {};
                 return;
             }
             
@@ -414,8 +436,8 @@ function traceStacks( fname, decodeData, cb ) {
             }            
         }
     } ).then( function() { 
-    
-            // start with each stacks's own time equal to its total time.
+        
+        // start with each stacks's own time equal to its total time.
         var rtnStats = _.map( frameStats, function( v, k ) { 
             v.ownTime = v.time;
             return v;
