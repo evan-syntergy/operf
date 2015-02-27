@@ -213,7 +213,7 @@ function loadProfileFile( fname, decodeFile, cb ) {
                 var buffer = new Buffer( line, 'base64');
                 zlib.inflate( buffer, function( err, mapData ) {
                     if( !err ) { 
-                        decodeData = JSON.parse( mapData );
+                        decodeData = JSON.parse( JSON.parse( mapData ) );
 
                         process.nextTick( function() { 
                             traceStacks( fname, decodeData, cb );
